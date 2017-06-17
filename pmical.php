@@ -1,50 +1,111 @@
 <?php
 
-class calendar
+class pmical
 {
-  const DT_FORMAT = "Ymd\THis\Z";
+  const NOFILE = 0;
+  const INVALIDFILE = 1;
+  const FILEOK = 2;
+  const DTFORMAT = 'Ymd\THis\Z';
+  const HEADERBYTES = 30; //How many bytes to check at the beginning of an ics file
+                          //This covers the BEGIN and VERSION statement
 
-  private $calendars = array(
-    "Field Trips"   => "C:\\tmp\\ft.ics",
-    "Test Calendar" => "C:\\tmp\\test.ics",
-    "US Holidays" => "C:\\tmp\\us_en.ics"
-  );
+  //This is a template for an empty calendar
+  //According to the RFC a calendar needs at least
+  //one object in it, hence the initial calendar creation
+  //event
+  const EMPTYCAL = <<<EOT
+BEGIN:VCALENDAR\r
+VERSION:2.0\r
+PRODID:-//Ryan Tolboom//pmical//EN\r
+URL:http://myURL.here\r
+X-WR-CALNAME:%name%\r
+CALSCALE:GREGORI\r
+METHOD:PUBLISH\r
+BEGIN:VEVENT\r
+UID:0\r
+DTSTAMP:%dtstamp%\r
+DTSTART:%dtstamp%\r
+SUMMARY:Calendar created\r
+END:VEVENT\r
+END:VCALENDAR\r\n
+EOT;
+
   private $fileName;
   private $lines;
+  private $config;
 
   public function __construct($name)
   {
+    //Load the config
+    $this->config = include("config.php");
+
     //Lookup the location of the calendar file by name
-    if (! array_key_exists($name, $this->calendars))
-    {
-      die("Unable to find calendar: $name");
-    }
+    if (! array_key_exists($name, $this->config['calendars']))
+      die("Unable to find calendar: $name\n");
     else
+      $this->fileName = $this->config['calendars'][$name];
+
+    switch ($this->checkFile())
     {
-      $this->fileName = $this->calendars[$name];
+      case self::NOFILE: //If we don't have a calendar file yet, make an empty one 
+
+        //Use the template and replace %name%
+        $search = array('%name%', '%dtstamp%');
+        $replace = array($name, $this->getDtStamp());
+        $emptyCal = str_replace($search, $replace, self::EMPTYCAL);
+
+        //Create and write to the file
+        $handle = fopen($this->fileName, "w");
+        if (! $handle)
+          die("Unable to open new calendar file: $this->fileName\n");
+        $size = strlen($emptyCal);
+        if (fwrite($handle, $emptyCal, $size) != $size)
+          die("Unable to write $size bytes to new calendar file $this->fileName\n");
+        fclose($handle);
+
+        break;
+      case self::INVALIDFILE:
+        die("Invalid calendar file format: $this->fileName\n");
+    }
+  }
+
+  private function getDtStamp()
+  {
+    $dtstamp = new DateTime('now');
+    $dtstamp = $dtstamp->format(self::DTFORMAT);
+    return $dtstamp;
+  }
+
+  private function checkFile()
+  {
+    //Does the file exist?
+    if (! file_exists($this->fileName))
+      return self::NOFILE;
+
+    //Can we open it?
+    $handle = fopen($this->fileName, "r");
+    if (! $handle)
+      die("Unable to open file: $this->fileName\n");
+
+    //Is the header what we are expecting?
+    $header = fread($handle, self::HEADERBYTES);
+    if (! $header)
+      die("Unable to read header of file: $this->fileName\n");
+    if (strncmp($header, self::EMPTYCAL, self::HEADERBYTES))
+    {
+      fclose($handle);
+      return self::INVALIDFILE;
     }
 
-    //If we don't have a calendar file yet, make an empty one
-    if (! file_exists($this->fileName))
-    {
-      $this->lines = array();
-      $lines[0] = "BEGIN:VCALENDAR\r\n";
-      $lines[1] = "VERSION:2.0\r\n";
-      $lines[2] = "PRODID:-//Ryan Tolboom//Calendar in Processmaker//EN\r\n";
-      $lines[3] = "URL:http://myURL.here\r\n";
-      $lines[4] = "X-WR-CALNAME:$name\r\n";
-      $lines[5] = "CALSCALE:GREGORI\r\n";
-      $lines[6] = "METHOD:PUBLISH\r\n";
-      $lines[7] = "END:VCALENDAR";
-      $this->write();
-    }
+    fclose($handle);
+    return self::FILEOK;
   }
 
   private function read()
   {
-    $this->lines = file($this->fileName);
+    $this->lines = file($this->fileName, FILE_IGNORE_NEW_LINES);
     if (! $this->lines)
-      die("Unable to read file: $this->fileName");
+      die("Unable to read file: $this->fileName\n");
   }
 
   private function write()
@@ -52,12 +113,13 @@ class calendar
     $handle = fopen($this->fileName, "w");
     if (! $handle)
       die("Unable to open file: $this->fileName");
-    if (! fwrite($handle, implode("", $this->lines)))
+    if (! fwrite($handle, implode("\r\n", $this->lines)))
     {
       fclose($handle);
-      die("Unable to write to file: $this->fileName");
+      die("Unable to write to file: $this->fileName\n");
     }
     fclose($handle);
+    $this->lines = array();
   }
 
   //Deletes an event in the lines array by UID and returns TRUE.
@@ -66,18 +128,18 @@ class calendar
   {
     //Go line by line and find our UID. Make a note of the start
     //and end indexes for the event
-    $uidLine = "UID:$uid\r\n";
+    $uidLine = "UID:$uid";
     $eventStartIndex = 0;
     $eventEndIndex = 0;
     $eventUidIndex = 0;
     foreach($this->lines as $index=>$line)
     {
       switch ($line) {
-        case "BEGIN:VEVENT\r\n":
+        case "BEGIN:VEVENT":
           $eventStartIndex = $index;
           $eventEndIndex = 0;
           break;
-        case "END:VEVENT\r\n":
+        case "END:VEVENT":
           $eventEndIndex = $index;
           break;
         case $uidLine:
@@ -104,7 +166,7 @@ class calendar
       $this->write();
   }
 
-  public function add($uid, $start, $end, $description, $summary)
+  public function save($uid, $start, $end, $description, $summary)
   {
     //Don't allow multiple events with the same UID
     $this->deleteFromLines($uid);
@@ -116,21 +178,16 @@ class calendar
     array_pop($this->lines);
 
     //Put all the datetimes in the correct format
-    $dtstamp = new DateTime("now");
-    $dtstamp = $dtstamp->format(self::DT_FORMAT);
-    $dtstart = $start->format(self::DT_FORMAT);
-    $dtend = $end->format(self::DT_FORMAT);
+    $dtstart = $start->format(self::DTFORMAT);
+    $dtend = $end->format(self::DTFORMAT);
 
+    //Put variables into our template
+    $search = array('%uid%', '%dtstamp%', '%dtstart%', '%dtend%', '%description%', '%summary%');
+    $replace = array($uid, $this->getDtStamp(), $dtstart, $dtend, $description, $summary);
+    $additionalLines = str_replace($search, $replace, $this->config['newEvent']);
+    
     //add this event on the end
-    array_push($this->lines, "BEGIN:VEVENT\r\n");
-    array_push($this->lines, "UID:$uid\r\n");
-    array_push($this->lines, "DTSTAMP:$dtstamp\r\n");
-    array_push($this->lines, "DTSTART:$dtstart\r\n");
-    array_push($this->lines, "DTEND:$dtend\r\n");
-    array_push($this->lines, "DESCRIPTION:$description\r\n");
-    array_push($this->lines, "SUMMARY:$summary\r\n");
-    array_push($this->lines, "END:VEVENT\r\n");
-    array_push($this->lines, "END:VCALENDAR\r\n");
+    $this->lines = array_merge($this->lines, $additionalLines);
 
     //Write the file again
     $this->write();

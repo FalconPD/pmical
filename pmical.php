@@ -16,22 +16,34 @@ class pmical
   //According to the RFC a calendar needs at least
   //one object in it, hence the initial calendar creation
   //event
-  const EMPTYCAL = <<<EOT
-BEGIN:VCALENDAR\r
-VERSION:2.0\r
-PRODID:-//Ryan Tolboom//pmical//EN\r
-URL:http://myURL.here\r
-X-WR-CALNAME:%name%\r
-CALSCALE:GREGORI\r
-METHOD:PUBLISH\r
-BEGIN:VEVENT\r
-UID:0\r
-DTSTAMP:%dtstamp%\r
-DTSTART:%dtstamp%\r
-SUMMARY:Calendar created\r
-END:VEVENT\r
-END:VCALENDAR\r\n
-EOT;
+  const EMPTYCAL = "BEGIN:VCALENDAR\r\n" .
+                   "VERSION:2.0\r\n" .
+                   "PRODID:-//Ryan Tolboom//pmical//EN\r\n" .
+                   "URL:http://myURL.here\r\n" .
+                   "X-WR-CALNAME:%name%\r\n" .
+                   "CALSCALE:GREGORI\r\n" .
+                   "METHOD:PUBLISH\r\n" .
+                   "BEGIN:VEVENT\r\n" .
+                   "UID:0\r\n" .
+                   "DTSTAMP:%dtstamp%\r\n" .
+                   "DTSTART:%dtstamp%\r\n" .
+                   "SUMMARY:Calendar created\r\n" .
+                   "END:VEVENT\r\n" .
+                   "END:VCALENDAR\r\n";
+
+  //This is a template for a new calendar event
+  //Notice how it also includes the END:VCALENDAR at the end
+  //this is because we will be appending this info
+  //to the end of the calendar file
+  const NEWEVENT = "BEGIN:VEVENT\r\n" .
+                   "UID:%uid%\r\n" .
+                   "DTSTAMP:%dtstamp%\r\n" .
+                   "DTSTART:%dtstart%\r\n" .
+                   "DTEND:%dtend%\r\n" .
+                   "DESCRIPTION:%description%\r\n" .
+                   "SUMMARY:%summary%\r\n" .
+                   "END:VEVENT\r\n" .
+                   "END:VCALENDAR\r\n";
 
   const BEGINVEVENT = "BEGIN:VEVENT\r\n";
   const ENDVEVENT = "END:VEVENT\r\n";
@@ -39,14 +51,11 @@ EOT;
   private $fileName;
   private $lines;
   private $config;
-  private $printBlocks;
 
   public function __construct($name)
   {
     //Load the config
     $this->config = include("config.php");
-
-    $this->printBlocks = false;
 
     //Lookup the location of the calendar file by name
     if (! array_key_exists($name, $this->config['calendars']))
@@ -134,7 +143,7 @@ EOT;
   //having to allocate huge arrays for large files
   private function copy($handle1, $handle2, $bytes)
   {
-    while ($bytes)
+    while ($bytes > 0)
     {
       if ($bytes >= self::BLOCKSIZE)
         $read = self::BLOCKSIZE;
@@ -143,8 +152,6 @@ EOT;
       $block = fread($handle1, $read);
       if (! $block)
         die("Error reading during copy.\n");
-      if ($this->printBlocks)
-        print($block);
       $write = fwrite($handle2, $block);
       if ($write != $read)
         die("Error writing during copy.\n");
@@ -157,9 +164,15 @@ EOT;
     //Read through the file line by line and get offset for the start and end of
     //the event
     $original = fopen($this->fileName, "r");
-    $fileSize = filesize($this->fileName);
     if (! $original)
       die("Unable to open $this->fileName for reading\n");
+    if (! flock($original, LOCK_EX))
+    {
+      fclose($original);
+      print("Unable to obtain file lock in delete function.\n");
+    }
+    clearstatcache();
+    $fileSize = filesize($this->fileName);
     $eventStartIndex = 0;
     $eventEndIndex = 0;
     $eventUidIndex = 0;
@@ -187,24 +200,23 @@ EOT;
     //copy it to a temp file but skip the event we want to delete.
     if ($eventUidIndex)
     {
-      print("$eventStartIndex $eventEndIndex $eventUidIndex\n");
       if (fseek($original, 0, SEEK_SET))
         die("Unable to seek to beginning of $this->fileName\n");
-      $tmpfname = tempnam(sys_get_temp_dir(), 'FOO');
+      $tmpfname = tempnam(sys_get_temp_dir(), 'pmical_');
       if (! $tmpfname)
         die("Uanble to create temporary file name.\n");
-      $tmpFile = fopen(tmpfname, "w");
+      $tmpFile = fopen($tmpfname, "w");
       if (! $tmpFile)
         die("Unable to open temporary calendar file.\n");
       $this->copy($original, $tmpFile, $eventStartIndex);
       if (fseek($original, $eventEndIndex, SEEK_SET))
         die("Unable to seek to $eventEndIndex in $this->fileName\n");
-      $this->printBlocks = true;
       $this->copy($original, $tmpFile, $fileSize - $eventEndIndex);
       fclose($tmpFile);
-      if (! rename($this->fileName, $tmpfname))
+      if (! rename($tmpfname, $this->fileName))
         die("Unable to rename $tmpfname to $this->fileName\n");
     }
+    flock($original, LOCK_UN);
     fclose($original);
   }
 
@@ -220,7 +232,24 @@ EOT;
     //Put variables into our template
     $search = array('%uid%', '%dtstamp%', '%dtstart%', '%dtend%', '%description%', '%summary%');
     $replace = array($uid, $this->getDtStamp(), $dtstart, $dtend, $description, $summary);
-    $additionalLines = str_replace($search, $replace, $this->config['newEvent']);
+    $additionalLines = str_replace($search, $replace, self::NEWEVENT);
+
+    //Add our lines to the end of the file, ovewriting the END:CALENDAR line
+    $handle = fopen($this->fileName, "c");
+    if (! $handle)
+      die("Unable to open $this->fileName in save function.\n");
+    if (! flock($handle, LOCK_EX))
+    {
+      fclose($handle);
+      die("Unable to obtain lock on $this->fileName in save function.\n");
+    }
+    $offset = -1 * self::TAILBYTES;
+    if (fseek($handle, $offset, SEEK_END))
+      die("Unable to seek to $offset in $this->fileName\n");
+    if (! fwrite($handle, $additionalLines))
+      die("Unable to write to $this->fileName in save function.\n");
+    flock($handle, LOCK_UN);
+    fclose($handle);
   } 
 }
 
